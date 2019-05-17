@@ -27,6 +27,7 @@
 #include "binary_keyboard.h"
 #include "ctr_drbg.h"
 #include "hid_mapping.h"
+#include "newline_settings.h"
 #include "password_generation.h"
 #include "usbd_hid_impl.h"
 
@@ -62,6 +63,7 @@ typedef struct internalStorage_t {
 #define STORAGE_MAGIC 0xDEAD1337
     uint32_t magic;
     uint32_t keyboard_layout;
+    uint32_t newline;
     /**
      * A metadata in memory is represented by 1 byte of size (l), 1 byte of type (to disable it if required), 1 byte to select char sets, l bytes of user seed
      */
@@ -77,6 +79,7 @@ static const uint8_t EMPTY_REPORT[] =       {0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 static const uint8_t SPACE_REPORT[] =       {0x00, 0x00, 0x2C, 0x00, 0x00, 0x00, 0x00, 0x00};
 static const uint8_t CAPS_REPORT[] =        {0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 static const uint8_t CAPS_LOCK_REPORT[] =   {0x00, 0x00, 0x39, 0x00, 0x00, 0x00, 0x00, 0x00};
+static const uint8_t CARRIAGE_RETURN[] =    {0x00, 0x00, 0x28, 0x00, 0x00, 0x00, 0x00, 0x00};
 
 volatile unsigned int G_led_status;
 
@@ -182,18 +185,25 @@ void type_password(uint8_t *data, uint32_t dataSize, uint8_t *out,
                 case '^':
                     // insert a extra space to validate the symbol
                     io_usb_send_ep_wait(HID_EPIN_ADDR, SPACE_REPORT, 8, 20);
-                    io_usb_send_ep_wait(HID_EPIN_ADDR, EMPTY_REPORT, 8, 20);                    
+                    io_usb_send_ep_wait(HID_EPIN_ADDR, EMPTY_REPORT, 8, 20);
                     break;
             }
         }
     }
+
     // restore shift state
     if (led_status&2){
         io_usb_send_ep_wait(HID_EPIN_ADDR, CAPS_LOCK_REPORT, 8, 20);
         io_usb_send_ep_wait(HID_EPIN_ADDR, EMPTY_REPORT, 8, 20);
     }
-}
 
+    // if we enabled newline then send it
+    if (N_storage.newline == NEWLINE_ENABLED) {
+      io_usb_send_ep_wait(HID_EPIN_ADDR, CARRIAGE_RETURN, 8, 20);
+      // EMPTY_REPORT is "unpress key"
+      io_usb_send_ep_wait(HID_EPIN_ADDR, EMPTY_REPORT, 8, 20);
+    }
+}
 
 typedef struct {
     uint8_t len_data;
@@ -319,6 +329,26 @@ void menu_settings_layout_init(unsigned int ignored) {
   UX_MENU_DISPLAY(N_storage.keyboard_layout>0?N_storage.keyboard_layout-1:0, menu_settings_layout, NULL);
 }
 
+// ----- newline -----
+void menu_settings_newline_change(uint32_t newline) {
+  nvm_write(&N_storage.newline, (void*)&newline, sizeof(uint32_t));
+  // go back to the menu entry
+  UX_MENU_DISPLAY(0, menu_settings, NULL);
+}
+
+const ux_menu_entry_t menu_settings_newline[] = {
+  {NULL, menu_settings_newline_change, NEWLINE_DISABLED, NULL, "Disabled", NULL, 0, 0},
+  {NULL, menu_settings_newline_change, NEWLINE_ENABLED, NULL, "Enabled", NULL, 0, 0},
+  UX_MENU_END
+};
+
+void menu_settings_newline_init(unsigned int ignored) {
+  UNUSED(ignored);
+  UX_MENU_DISPLAY(N_storage.newline>0?N_storage.newline:0, menu_settings_newline, NULL);
+}
+
+// ---- end of newline ----
+
 void menu_reset_confirm(unsigned int ignored) {
     UNUSED(ignored);
     reset_metadatas();
@@ -334,6 +364,7 @@ const ux_menu_entry_t menu_reset_all[] = {
 
 const ux_menu_entry_t menu_settings[] = {
   {NULL, menu_settings_layout_init, 0, NULL, "Keyboard layout", NULL, 0, 0},
+  {NULL, menu_settings_newline_init, 0, NULL, "Insert newline", NULL, 0, 0},
   {menu_reset_all, NULL, 0, NULL, "Delete all pwds", NULL, 0, 0},
   {menu_main, NULL, 3, &C_icon_back, "Back", NULL, 61, 40},
   UX_MENU_END
@@ -506,7 +537,7 @@ void ux_check_status(unsigned int status) {
     if (status == BOLOS_UX_OK && mode == MODE_CREATE) {
         menu_new_entry_finish(ux.params.u.keyboard.entered_text);
     }
-} 
+}
 
 void menu_entry_create_next(unsigned int class_to_ask);
 
@@ -552,7 +583,7 @@ void menu_entry_create_next(unsigned int class_to_ask) {
     // reset classes activated on first call
     if( class_to_ask>>16 == 0) {
         G_create_classes = 0;
-    } 
+    }
     G_create_classes |= class_to_ask & 0xFF;
     if (class_to_ask>>16 >= ARRAYLEN(menu_entry_create_classes)) {
         // now ask the user's password
